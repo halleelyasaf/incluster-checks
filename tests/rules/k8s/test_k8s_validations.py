@@ -5,9 +5,9 @@ Adapted from HealthChecks test patterns for AllPodsReadyAndRunning.
 """
 
 import json
+from unittest.mock import Mock
 
 import pytest
-from unittest.mock import Mock
 
 from in_cluster_checks.rules.k8s.k8s_validations import (
     AllDeploymentsAvailable,
@@ -22,10 +22,15 @@ from in_cluster_checks.rules.k8s.k8s_validations import (
     ValidateNamespaceStatus,
     VerifyAcmOperatorHealth,
     VerifyClusterOperatorsAvailable,
+    VerifyFarContainerNonRoot,
+    VerifyFARControllerReplicas,
     VerifyFarOperatorHealth,
     VerifyInternalRegistry,
+    VerifyMdrOperatorHealth,
     VerifyNetworkDiagnosticsDisabled,
     VerifyNfdOperatorHealth,
+    VerifyNfdPodRestartCount,
+    VerifyNmoOperatorHealth,
     VerifyWebConsoleDisabled,
 )
 from in_cluster_checks.utils.enums import Status
@@ -192,7 +197,11 @@ class TestNodesCpuAndMemoryStatus:
     def test_all_nodes_normal_usage(self, tested_object):
         """Test when all nodes have normal CPU/memory usage."""
         tested_object.oc_api.run_oc_command = Mock(
-            return_value=(0, "node1    100m    5%     2000Mi   10%\nnode2    200m    10%    3000Mi   15%", "")
+            return_value=(
+                0,
+                "node1    100m    5%     2000Mi   10%\nnode2    200m    10%    3000Mi   15%",
+                "",
+            )
         )
 
         result = tested_object.run_rule()
@@ -201,7 +210,11 @@ class TestNodesCpuAndMemoryStatus:
     def test_high_cpu_usage(self, tested_object):
         """Test when some nodes have high CPU usage."""
         tested_object.oc_api.run_oc_command = Mock(
-            return_value=(0, "node1    10000m  85%    2000Mi   10%\nnode2    200m    10%    3000Mi   15%", "")
+            return_value=(
+                0,
+                "node1    10000m  85%    2000Mi   10%\nnode2    200m    10%    3000Mi   15%",
+                "",
+            )
         )
 
         result = tested_object.run_rule()
@@ -213,7 +226,11 @@ class TestNodesCpuAndMemoryStatus:
     def test_high_memory_usage(self, tested_object):
         """Test when some nodes have high memory usage."""
         tested_object.oc_api.run_oc_command = Mock(
-            return_value=(0, "node1    100m    5%     50000Mi  90%\nnode2    200m    10%    3000Mi   15%", "")
+            return_value=(
+                0,
+                "node1    100m    5%     50000Mi  90%\nnode2    200m    10%    3000Mi   15%",
+                "",
+            )
         )
 
         result = tested_object.run_rule()
@@ -411,7 +428,10 @@ class TestValidateAllDaemonsetsScheduled:
         daemonsets_data = {
             "items": [
                 {
-                    "metadata": {"name": "vg-manager", "namespace": "openshift-storage"},
+                    "metadata": {
+                        "name": "vg-manager",
+                        "namespace": "openshift-storage",
+                    },
                     "status": {
                         "desiredNumberScheduled": 0,
                         "currentNumberScheduled": 0,
@@ -438,7 +458,10 @@ class TestValidateAllDaemonsetsScheduled:
         daemonsets_data = {
             "items": [
                 {
-                    "metadata": {"name": "vg-manager", "namespace": "openshift-storage"},
+                    "metadata": {
+                        "name": "vg-manager",
+                        "namespace": "openshift-storage",
+                    },
                     "status": {
                         "desiredNumberScheduled": 1,
                         "currentNumberScheduled": 1,
@@ -924,6 +947,112 @@ class TestCheckDeploymentsReplicaStatus(RuleTestBase):
             tested_object_mock_dict={"oc_api.get_all_deployments": Mock(return_value=[])},
             failed_msg="No deployments found in cluster",
         ),
+        RuleScenarioParams(
+            "deployment with failed conditions shows diagnostic info",
+            tested_object_mock_dict={
+                "oc_api.get_all_deployments": Mock(
+                    return_value=[
+                        create_mock_deployment(
+                            "assisted-chat",
+                            "assisted-chat",
+                            spec={"replicas": 1},
+                            status={
+                                "replicas": 1,
+                                "readyReplicas": 0,
+                                "availableReplicas": 0,
+                                "updatedReplicas": 1,
+                                "conditions": [
+                                    {
+                                        "type": "Available",
+                                        "status": "False",
+                                        "reason": "MinimumReplicasUnavailable",
+                                        "message": "Deployment does not have minimum availability.",
+                                    },
+                                    {
+                                        "type": "Progressing",
+                                        "status": "False",
+                                        "reason": "ProgressDeadlineExceeded",
+                                        "message": 'ReplicaSet "assisted-chat-5c78bb9bf" has timed out progressing.',
+                                    },
+                                ],
+                            },
+                        ),
+                    ]
+                )
+            },
+            failed_msg="Following deployments have replica count issues:\n"
+            "  assisted-chat/assisted-chat - Desired: 1, Ready: 0 "
+            "[MinimumReplicasUnavailable: Deployment does not have minimum availability.] "
+            "[ProgressDeadlineExceeded: ReplicaSet "
+            '"assisted-chat-5c78bb9bf" has timed out progressing.]',
+        ),
+        RuleScenarioParams(
+            "deployment with partial failure and conditions",
+            tested_object_mock_dict={
+                "oc_api.get_all_deployments": Mock(
+                    return_value=[
+                        create_mock_deployment(
+                            "partial-failure",
+                            "prod-ns",
+                            spec={"replicas": 5},
+                            status={
+                                "replicas": 5,
+                                "readyReplicas": 2,
+                                "availableReplicas": 2,
+                                "updatedReplicas": 5,
+                                "conditions": [
+                                    {
+                                        "type": "Available",
+                                        "status": "False",
+                                        "reason": "MinimumReplicasUnavailable",
+                                        "message": "Deployment does not have minimum availability.",
+                                    },
+                                ],
+                            },
+                        ),
+                    ]
+                )
+            },
+            failed_msg="Following deployments have replica count issues:\n"
+            "  prod-ns/partial-failure - Desired: 5, Ready: 2 "
+            "[MinimumReplicasUnavailable: Deployment does not have minimum availability.]",
+        ),
+        RuleScenarioParams(
+            "deployment with conditions all passing still fails on replica mismatch",
+            tested_object_mock_dict={
+                "oc_api.get_all_deployments": Mock(
+                    return_value=[
+                        create_mock_deployment(
+                            "scaling-deployment",
+                            "default",
+                            spec={"replicas": 3},
+                            status={
+                                "replicas": 3,
+                                "readyReplicas": 1,
+                                "availableReplicas": 1,
+                                "updatedReplicas": 3,
+                                "conditions": [
+                                    {
+                                        "type": "Available",
+                                        "status": "True",
+                                        "reason": "MinimumReplicasAvailable",
+                                        "message": "Deployment has minimum availability.",
+                                    },
+                                    {
+                                        "type": "Progressing",
+                                        "status": "True",
+                                        "reason": "NewReplicaSetAvailable",
+                                        "message": 'ReplicaSet "scaling-deployment-abc" has successfully progressed.',
+                                    },
+                                ],
+                            },
+                        ),
+                    ]
+                )
+            },
+            failed_msg="Following deployments have replica count issues:\n"
+            "  default/scaling-deployment - Desired: 3, Ready: 1",
+        ),
     ]
 
     @pytest.mark.parametrize("scenario_params", scenario_passed)
@@ -1061,7 +1190,15 @@ class TestValidateAllPoliciesCompliant(RuleTestBase):
 
     tested_type = ValidateAllPoliciesCompliant
 
-    _POLICIES_CMD_KEY = ("get", ("policies.policy.open-cluster-management.io", "--all-namespaces", "-o", "json"))
+    _POLICIES_CMD_KEY = (
+        "get",
+        (
+            "policies.policy.open-cluster-management.io",
+            "--all-namespaces",
+            "-o",
+            "json",
+        ),
+    )
 
     all_compliant_policies = {
         "items": [
@@ -1192,8 +1329,18 @@ class TestVerifyInternalRegistry(RuleTestBase):
                 "oc_api.run_oc_command": Mock(return_value=(0, json.dumps(registry_config_managed), "")),
                 "oc_api.get_all_pods": Mock(
                     return_value=[
-                        create_mock_registry_pod("image-registry-1", "openshift-image-registry", "Running", True),
-                        create_mock_registry_pod("image-registry-2", "openshift-image-registry", "Running", True),
+                        create_mock_registry_pod(
+                            "image-registry-1",
+                            "openshift-image-registry",
+                            "Running",
+                            True,
+                        ),
+                        create_mock_registry_pod(
+                            "image-registry-2",
+                            "openshift-image-registry",
+                            "Running",
+                            True,
+                        ),
                     ]
                 ),
             },
@@ -1204,7 +1351,12 @@ class TestVerifyInternalRegistry(RuleTestBase):
                 "oc_api.run_oc_command": Mock(return_value=(0, json.dumps(registry_config_managed), "")),
                 "oc_api.get_all_pods": Mock(
                     return_value=[
-                        create_mock_registry_pod("image-registry-1", "openshift-image-registry", "Running", True),
+                        create_mock_registry_pod(
+                            "image-registry-1",
+                            "openshift-image-registry",
+                            "Running",
+                            True,
+                        ),
                     ]
                 ),
             },
@@ -1241,7 +1393,12 @@ class TestVerifyInternalRegistry(RuleTestBase):
                 "oc_api.run_oc_command": Mock(return_value=(0, json.dumps(registry_config_managed), "")),
                 "oc_api.get_all_pods": Mock(
                     return_value=[
-                        create_mock_registry_pod("image-registry-1", "openshift-image-registry", "Pending", True),
+                        create_mock_registry_pod(
+                            "image-registry-1",
+                            "openshift-image-registry",
+                            "Pending",
+                            True,
+                        ),
                     ]
                 ),
             },
@@ -1254,7 +1411,12 @@ class TestVerifyInternalRegistry(RuleTestBase):
                 "oc_api.run_oc_command": Mock(return_value=(0, json.dumps(registry_config_managed), "")),
                 "oc_api.get_all_pods": Mock(
                     return_value=[
-                        create_mock_registry_pod("image-registry-1", "openshift-image-registry", "Running", False),
+                        create_mock_registry_pod(
+                            "image-registry-1",
+                            "openshift-image-registry",
+                            "Running",
+                            False,
+                        ),
                     ]
                 ),
             },
@@ -1666,9 +1828,10 @@ class TestVerifyNetworkDiagnosticsDisabled(RuleTestBase):
                 "oc_api.get_all_pods": Mock(return_value=[]),
             },
             oc_cmd_output_dict={
-                ("get", ("network.operator.openshift.io", "cluster", "-o", "json")): CmdOutput(
-                    json.dumps(_network_config(True))
-                ),
+                (
+                    "get",
+                    ("network.operator.openshift.io", "cluster", "-o", "json"),
+                ): CmdOutput(json.dumps(_network_config(True))),
             },
         ),
     ]
@@ -1677,17 +1840,19 @@ class TestVerifyNetworkDiagnosticsDisabled(RuleTestBase):
         RuleScenarioParams(
             "network diagnostics is not disabled (disableNetworkDiagnostics is false)",
             oc_cmd_output_dict={
-                ("get", ("network.operator.openshift.io", "cluster", "-o", "json")): CmdOutput(
-                    json.dumps(_network_config(False))
-                ),
+                (
+                    "get",
+                    ("network.operator.openshift.io", "cluster", "-o", "json"),
+                ): CmdOutput(json.dumps(_network_config(False))),
             },
         ),
         RuleScenarioParams(
             "network operator disableNetworkDiagnostics is missing",
             oc_cmd_output_dict={
-                ("get", ("network.operator.openshift.io", "cluster", "-o", "json")): CmdOutput(
-                    json.dumps(_network_config())
-                ),
+                (
+                    "get",
+                    ("network.operator.openshift.io", "cluster", "-o", "json"),
+                ): CmdOutput(json.dumps(_network_config())),
             },
         ),
     ]
@@ -1704,9 +1869,10 @@ class TestVerifyNetworkDiagnosticsDisabled(RuleTestBase):
                 ),
             },
             oc_cmd_output_dict={
-                ("get", ("network.operator.openshift.io", "cluster", "-o", "json")): CmdOutput(
-                    json.dumps(_network_config(True))
-                ),
+                (
+                    "get",
+                    ("network.operator.openshift.io", "cluster", "-o", "json"),
+                ): CmdOutput(json.dumps(_network_config(True))),
             },
             failed_msg="Found 2 pod(s) in openshift-network-diagnostics namespace "
             "but network diagnostics should be disabled:\n"
@@ -1783,9 +1949,15 @@ class TestVerifyNfdOperatorHealth(RuleTestBase):
                 ),
             },
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps(_nfd_subscriptions(include_nfd=True))
-                ),
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_nfd_subscriptions(include_nfd=True))),
             },
         ),
     ]
@@ -1794,17 +1966,29 @@ class TestVerifyNfdOperatorHealth(RuleTestBase):
         RuleScenarioParams(
             "NFD operator subscription not found",
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps(_nfd_subscriptions(include_nfd=False))
-                ),
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_nfd_subscriptions(include_nfd=False))),
             },
         ),
         RuleScenarioParams(
             "no subscriptions exist in cluster",
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps({"items": []})
-                ),
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps({"items": []})),
             },
         ),
     ]
@@ -1816,9 +2000,15 @@ class TestVerifyNfdOperatorHealth(RuleTestBase):
                 "oc_api.get_all_pods": Mock(return_value=[]),
             },
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps(_nfd_subscriptions(include_nfd=True))
-                ),
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_nfd_subscriptions(include_nfd=True))),
             },
             failed_msg="No pods found in openshift-nfd namespace. NFD operator may not be fully deployed.",
         ),
@@ -1833,9 +2023,15 @@ class TestVerifyNfdOperatorHealth(RuleTestBase):
                 ),
             },
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps(_nfd_subscriptions(include_nfd=True))
-                ),
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_nfd_subscriptions(include_nfd=True))),
             },
             failed_msg="NFD operator has unhealthy pods in openshift-nfd namespace:\n"
             "  nfd-worker-xyz789 - Phase: Pending",
@@ -1850,9 +2046,15 @@ class TestVerifyNfdOperatorHealth(RuleTestBase):
                 ),
             },
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps(_nfd_subscriptions(include_nfd=True))
-                ),
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_nfd_subscriptions(include_nfd=True))),
             },
             failed_msg="NFD operator has unhealthy pods in openshift-nfd namespace:\n"
             "  nfd-controller-manager-abc123 - Running, Not all containers ready",
@@ -1867,9 +2069,15 @@ class TestVerifyNfdOperatorHealth(RuleTestBase):
                 ),
             },
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps(_nfd_subscriptions(include_nfd=True))
-                ),
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_nfd_subscriptions(include_nfd=True))),
             },
             failed_msg="Failed to evaluate status for NFD pod(s):\n  nfd-controller-manager-abc123",
         ),
@@ -1891,6 +2099,190 @@ class TestVerifyNfdOperatorHealth(RuleTestBase):
         RuleTestBase.test_scenario_failed(self, scenario_params, tested_object)
 
 
+def _create_mock_nfd_restart_pod(name, container_statuses, init_container_statuses=None):
+    """Create a mock NFD pod object for restart count tests."""
+    mock_pod = Mock()
+    mock_pod.name.return_value = name
+    status = {"containerStatuses": container_statuses}
+    if init_container_statuses:
+        status["initContainerStatuses"] = init_container_statuses
+    mock_pod.as_dict.return_value = {
+        "metadata": {"name": name, "namespace": "openshift-nfd"},
+        "status": status,
+    }
+    return mock_pod
+
+
+_NFD_RESTART_SUB_CMD = ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json"))
+
+
+class TestVerifyNfdPodRestartCount(RuleTestBase):
+    """Test VerifyNfdPodRestartCount rule."""
+
+    tested_type = VerifyNfdPodRestartCount
+
+    scenario_prerequisite_fulfilled = [
+        RuleScenarioParams(
+            "NFD operator subscription found",
+            oc_cmd_output_dict={
+                _NFD_RESTART_SUB_CMD: CmdOutput(json.dumps(_nfd_subscriptions(include_nfd=True))),
+            },
+        ),
+    ]
+
+    scenario_prerequisite_not_fulfilled = [
+        RuleScenarioParams(
+            "NFD operator subscription not found",
+            oc_cmd_output_dict={
+                _NFD_RESTART_SUB_CMD: CmdOutput(json.dumps(_nfd_subscriptions(include_nfd=False))),
+            },
+        ),
+        RuleScenarioParams(
+            "no subscriptions exist in cluster",
+            oc_cmd_output_dict={
+                _NFD_RESTART_SUB_CMD: CmdOutput(json.dumps({"items": []})),
+            },
+        ),
+    ]
+
+    scenario_passed = [
+        RuleScenarioParams(
+            "NFD pods have zero restart count",
+            oc_cmd_output_dict={
+                _NFD_RESTART_SUB_CMD: CmdOutput(json.dumps(_nfd_subscriptions(include_nfd=True))),
+            },
+            tested_object_mock_dict={
+                "oc_api.get_pods": Mock(
+                    return_value=[
+                        _create_mock_nfd_restart_pod(
+                            "nfd-controller-manager-abc123",
+                            [{"name": "manager", "restartCount": 0, "ready": True}],
+                        ),
+                        _create_mock_nfd_restart_pod(
+                            "nfd-worker-xyz789",
+                            [{"name": "nfd-worker", "restartCount": 0, "ready": True}],
+                        ),
+                    ]
+                ),
+            },
+        ),
+        RuleScenarioParams(
+            "NFD pods with init containers all zero restarts",
+            oc_cmd_output_dict={
+                _NFD_RESTART_SUB_CMD: CmdOutput(json.dumps(_nfd_subscriptions(include_nfd=True))),
+            },
+            tested_object_mock_dict={
+                "oc_api.get_pods": Mock(
+                    return_value=[
+                        _create_mock_nfd_restart_pod(
+                            "nfd-controller-manager-abc123",
+                            [{"name": "manager", "restartCount": 0, "ready": True}],
+                            init_container_statuses=[{"name": "init-setup", "restartCount": 0, "ready": True}],
+                        ),
+                    ]
+                ),
+            },
+        ),
+    ]
+
+    scenario_failed = [
+        RuleScenarioParams(
+            "NFD pods not found in namespace",
+            oc_cmd_output_dict={
+                _NFD_RESTART_SUB_CMD: CmdOutput(json.dumps(_nfd_subscriptions(include_nfd=True))),
+            },
+            tested_object_mock_dict={
+                "oc_api.get_pods": Mock(return_value=[]),
+            },
+            failed_msg="No pods found in openshift-nfd namespace. NFD operator may not be fully deployed.",
+        ),
+        RuleScenarioParams(
+            "NFD pod has non-zero restart count",
+            oc_cmd_output_dict={
+                _NFD_RESTART_SUB_CMD: CmdOutput(json.dumps(_nfd_subscriptions(include_nfd=True))),
+            },
+            tested_object_mock_dict={
+                "oc_api.get_pods": Mock(
+                    return_value=[
+                        _create_mock_nfd_restart_pod(
+                            "nfd-controller-manager-abc123",
+                            [{"name": "manager", "restartCount": 0, "ready": True}],
+                        ),
+                        _create_mock_nfd_restart_pod(
+                            "nfd-worker-xyz789",
+                            [{"name": "nfd-worker", "restartCount": 3, "ready": True}],
+                        ),
+                    ]
+                ),
+            },
+            failed_msg="NFD pods in openshift-nfd namespace have non-zero restart counts:\n"
+            "  nfd-worker-xyz789/nfd-worker: restartCount=3",
+        ),
+        RuleScenarioParams(
+            "Multiple NFD pods with restarts across containers",
+            oc_cmd_output_dict={
+                _NFD_RESTART_SUB_CMD: CmdOutput(json.dumps(_nfd_subscriptions(include_nfd=True))),
+            },
+            tested_object_mock_dict={
+                "oc_api.get_pods": Mock(
+                    return_value=[
+                        _create_mock_nfd_restart_pod(
+                            "nfd-controller-manager-abc123",
+                            [{"name": "manager", "restartCount": 2, "ready": True}],
+                        ),
+                        _create_mock_nfd_restart_pod(
+                            "nfd-worker-xyz789",
+                            [{"name": "nfd-worker", "restartCount": 5, "ready": True}],
+                        ),
+                    ]
+                ),
+            },
+            failed_msg="NFD pods in openshift-nfd namespace have non-zero restart counts:\n"
+            "  nfd-controller-manager-abc123/manager: restartCount=2\n"
+            "  nfd-worker-xyz789/nfd-worker: restartCount=5",
+        ),
+        RuleScenarioParams(
+            "NFD init container has non-zero restart count",
+            oc_cmd_output_dict={
+                _NFD_RESTART_SUB_CMD: CmdOutput(json.dumps(_nfd_subscriptions(include_nfd=True))),
+            },
+            tested_object_mock_dict={
+                "oc_api.get_pods": Mock(
+                    return_value=[
+                        _create_mock_nfd_restart_pod(
+                            "nfd-controller-manager-abc123",
+                            [{"name": "manager", "restartCount": 0, "ready": True}],
+                            init_container_statuses=[{"name": "init-setup", "restartCount": 1, "ready": True}],
+                        ),
+                    ]
+                ),
+            },
+            failed_msg="NFD pods in openshift-nfd namespace have non-zero restart counts:\n"
+            "  nfd-controller-manager-abc123/init-setup: restartCount=1",
+        ),
+    ]
+
+    @pytest.mark.parametrize("scenario_params", scenario_prerequisite_fulfilled)
+    def test_prerequisite_fulfilled(self, scenario_params, tested_object):
+        """Test that prerequisite is met when NFD operator is installed."""
+        RuleTestBase.test_prerequisite_fulfilled(self, scenario_params, tested_object)
+
+    @pytest.mark.parametrize("scenario_params", scenario_prerequisite_not_fulfilled)
+    def test_prerequisite_not_fulfilled(self, scenario_params, tested_object):
+        """Test that prerequisite is not met when NFD operator is not installed."""
+        RuleTestBase.test_prerequisite_not_fulfilled(self, scenario_params, tested_object)
+
+    @pytest.mark.parametrize("scenario_params", scenario_passed)
+    def test_scenario_passed(self, scenario_params, tested_object):
+        """Test that rule passes when all NFD pods have zero restart count."""
+        RuleTestBase.test_scenario_passed(self, scenario_params, tested_object)
+
+    @pytest.mark.parametrize("scenario_params", scenario_failed)
+    def test_scenario_failed(self, scenario_params, tested_object):
+        """Test that rule fails when NFD pods have non-zero restart counts."""
+        RuleTestBase.test_scenario_failed(self, scenario_params, tested_object)
+
+
 def create_mock_acm_pod(name, phase, all_containers_ready=True):
     """Create a mock ACM pod object."""
     mock_pod = Mock()
@@ -1907,16 +2299,20 @@ def create_mock_acm_pod(name, phase, all_containers_ready=True):
     return mock_pod
 
 
-def _acm_subscriptions(include_acm=True):
+def _acm_subscriptions(include_acm=True, installed_csv="advanced-cluster-management.v2.12.0"):
     """Build a subscriptions response, optionally including the ACM subscription."""
     items = []
     if include_acm:
-        items.append(
-            {
-                "metadata": {"name": "acm-sub", "namespace": "open-cluster-management"},
-                "spec": {"name": "advanced-cluster-management", "source": "redhat-operators"},
-            }
-        )
+        sub = {
+            "metadata": {"name": "acm-sub", "namespace": "open-cluster-management"},
+            "spec": {
+                "name": "advanced-cluster-management",
+                "source": "redhat-operators",
+            },
+        }
+        if installed_csv:
+            sub["status"] = {"installedCSV": installed_csv}
+        items.append(sub)
     items.append(
         {
             "metadata": {"name": "other-operator", "namespace": "openshift-operators"},
@@ -1926,14 +2322,52 @@ def _acm_subscriptions(include_acm=True):
     return {"items": items}
 
 
+def _acm_csv_response(include_csv=True, phase="Succeeded"):
+    """Build a ClusterServiceVersion list response for ACM."""
+    items = []
+    if include_csv:
+        reason = "InstallSucceeded" if phase == "Succeeded" else "InstallFailed"
+        message = "install strategy completed with no errors" if phase == "Succeeded" else "install failed"
+        items.append(
+            {
+                "metadata": {
+                    "name": "advanced-cluster-management.v2.12.0",
+                    "namespace": "open-cluster-management",
+                },
+                "status": {
+                    "phase": phase,
+                    "reason": reason,
+                    "message": message,
+                },
+            }
+        )
+    return {"items": items}
+
+
+_ACM_SUB_CMD = (
+    "get",
+    ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json"),
+)
+_ACM_CSV_CMD = ("get", ("csv", "-n", "open-cluster-management", "-o", "json"))
+
+
 class TestVerifyAcmOperatorHealth(RuleTestBase):
     """Test VerifyAcmOperatorHealth rule."""
 
     tested_type = VerifyAcmOperatorHealth
 
+    scenario_prerequisite_fulfilled = [
+        RuleScenarioParams(
+            "ACM operator subscription found",
+            oc_cmd_output_dict={
+                _ACM_SUB_CMD: CmdOutput(json.dumps(_acm_subscriptions(include_acm=True))),
+            },
+        ),
+    ]
+
     scenario_passed = [
         RuleScenarioParams(
-            "ACM operator installed and all pods are healthy",
+            "ACM operator installed, CSV succeeded via installedCSV, and all pods are healthy",
             tested_object_mock_dict={
                 "oc_api.get_all_pods": Mock(
                     return_value=[
@@ -1943,9 +2377,22 @@ class TestVerifyAcmOperatorHealth(RuleTestBase):
                 ),
             },
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps(_acm_subscriptions(include_acm=True))
+                _ACM_SUB_CMD: CmdOutput(json.dumps(_acm_subscriptions(include_acm=True))),
+                _ACM_CSV_CMD: CmdOutput(json.dumps(_acm_csv_response())),
+            },
+        ),
+        RuleScenarioParams(
+            "ACM operator installed, CSV succeeded via pattern fallback (no installedCSV)",
+            tested_object_mock_dict={
+                "oc_api.get_all_pods": Mock(
+                    return_value=[
+                        create_mock_acm_pod("multiclusterhub-operator-abc123", "Running", True),
+                    ]
                 ),
+            },
+            oc_cmd_output_dict={
+                _ACM_SUB_CMD: CmdOutput(json.dumps(_acm_subscriptions(include_acm=True, installed_csv=None))),
+                _ACM_CSV_CMD: CmdOutput(json.dumps(_acm_csv_response())),
             },
         ),
     ]
@@ -1954,36 +2401,67 @@ class TestVerifyAcmOperatorHealth(RuleTestBase):
         RuleScenarioParams(
             "ACM operator subscription not found",
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps(_acm_subscriptions(include_acm=False))
-                ),
+                _ACM_SUB_CMD: CmdOutput(json.dumps(_acm_subscriptions(include_acm=False))),
             },
         ),
         RuleScenarioParams(
             "no subscriptions exist in cluster",
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps({"items": []})
-                ),
+                _ACM_SUB_CMD: CmdOutput(json.dumps({"items": []})),
             },
         ),
     ]
 
     scenario_failed = [
         RuleScenarioParams(
-            "ACM operator installed but no pods found",
+            "ACM CSV not found in namespace",
+            tested_object_mock_dict={
+                "oc_api.get_all_pods": Mock(
+                    return_value=[
+                        create_mock_acm_pod("multiclusterhub-operator-abc123", "Running", True),
+                    ]
+                ),
+            },
+            oc_cmd_output_dict={
+                _ACM_SUB_CMD: CmdOutput(json.dumps(_acm_subscriptions(include_acm=True))),
+                _ACM_CSV_CMD: CmdOutput(json.dumps(_acm_csv_response(include_csv=False))),
+            },
+            failed_msg=(
+                "No ClusterServiceVersion matching 'advanced-cluster-management' "
+                "found in open-cluster-management namespace"
+            ),
+        ),
+        RuleScenarioParams(
+            "ACM CSV in Failed phase",
+            tested_object_mock_dict={
+                "oc_api.get_all_pods": Mock(
+                    return_value=[
+                        create_mock_acm_pod("multiclusterhub-operator-abc123", "Running", True),
+                    ]
+                ),
+            },
+            oc_cmd_output_dict={
+                _ACM_SUB_CMD: CmdOutput(json.dumps(_acm_subscriptions(include_acm=True))),
+                _ACM_CSV_CMD: CmdOutput(json.dumps(_acm_csv_response(phase="Failed"))),
+            },
+            failed_msg=(
+                "ACM ClusterServiceVersion is not in Succeeded phase:\n"
+                "  advanced-cluster-management.v2.12.0 - Phase: Failed, Reason: InstallFailed, Message: install failed"
+            ),
+        ),
+        RuleScenarioParams(
+            "ACM CSV succeeded but no pods found",
             tested_object_mock_dict={
                 "oc_api.get_all_pods": Mock(return_value=[]),
             },
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps(_acm_subscriptions(include_acm=True))
-                ),
+                _ACM_SUB_CMD: CmdOutput(json.dumps(_acm_subscriptions(include_acm=True))),
+                _ACM_CSV_CMD: CmdOutput(json.dumps(_acm_csv_response())),
             },
             failed_msg="No pods found in open-cluster-management namespace. ACM operator may not be fully deployed.",
         ),
         RuleScenarioParams(
-            "ACM operator installed but some pods are not running",
+            "ACM CSV succeeded but some pods are not running",
             tested_object_mock_dict={
                 "oc_api.get_all_pods": Mock(
                     return_value=[
@@ -1993,15 +2471,16 @@ class TestVerifyAcmOperatorHealth(RuleTestBase):
                 ),
             },
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps(_acm_subscriptions(include_acm=True))
-                ),
+                _ACM_SUB_CMD: CmdOutput(json.dumps(_acm_subscriptions(include_acm=True))),
+                _ACM_CSV_CMD: CmdOutput(json.dumps(_acm_csv_response())),
             },
-            failed_msg="ACM operator has unhealthy pods in open-cluster-management namespace:\n"
-            "  cluster-manager-xyz789 - Phase: Pending",
+            failed_msg=(
+                "ACM operator has unhealthy pods in open-cluster-management namespace:\n"
+                "  cluster-manager-xyz789 - Phase: Pending"
+            ),
         ),
         RuleScenarioParams(
-            "ACM operator installed but containers not ready",
+            "ACM CSV succeeded but containers not ready",
             tested_object_mock_dict={
                 "oc_api.get_all_pods": Mock(
                     return_value=[
@@ -2010,15 +2489,16 @@ class TestVerifyAcmOperatorHealth(RuleTestBase):
                 ),
             },
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps(_acm_subscriptions(include_acm=True))
-                ),
+                _ACM_SUB_CMD: CmdOutput(json.dumps(_acm_subscriptions(include_acm=True))),
+                _ACM_CSV_CMD: CmdOutput(json.dumps(_acm_csv_response())),
             },
-            failed_msg="ACM operator has unhealthy pods in open-cluster-management namespace:\n"
-            "  multiclusterhub-operator-abc123 - Running, Not all containers ready",
+            failed_msg=(
+                "ACM operator has unhealthy pods in open-cluster-management namespace:\n"
+                "  multiclusterhub-operator-abc123 - Running, Not all containers ready"
+            ),
         ),
         RuleScenarioParams(
-            "ACM operator installed but pod status unknown",
+            "ACM CSV succeeded but pod status unknown",
             tested_object_mock_dict={
                 "oc_api.get_all_pods": Mock(
                     return_value=[
@@ -2027,13 +2507,59 @@ class TestVerifyAcmOperatorHealth(RuleTestBase):
                 ),
             },
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps(_acm_subscriptions(include_acm=True))
-                ),
+                _ACM_SUB_CMD: CmdOutput(json.dumps(_acm_subscriptions(include_acm=True))),
+                _ACM_CSV_CMD: CmdOutput(json.dumps(_acm_csv_response())),
             },
             failed_msg="Failed to evaluate status for ACM pod(s):\n  multiclusterhub-operator-abc123",
         ),
+        RuleScenarioParams(
+            "ACM CSV succeeded but mixed unknown and unhealthy pods",
+            tested_object_mock_dict={
+                "oc_api.get_all_pods": Mock(
+                    return_value=[
+                        create_mock_acm_pod("completed-job-pod", "Succeeded", True),
+                        create_mock_acm_pod("cluster-manager-xyz789", "Pending", True),
+                    ]
+                ),
+            },
+            oc_cmd_output_dict={
+                _ACM_SUB_CMD: CmdOutput(json.dumps(_acm_subscriptions(include_acm=True))),
+                _ACM_CSV_CMD: CmdOutput(json.dumps(_acm_csv_response())),
+            },
+            failed_msg=(
+                "Failed to evaluate status for ACM pod(s):\n"
+                "  completed-job-pod\n\n"
+                "ACM operator has unhealthy pods in open-cluster-management namespace:\n"
+                "  cluster-manager-xyz789 - Phase: Pending"
+            ),
+        ),
+        RuleScenarioParams(
+            "ACM CSV failed and pods unhealthy",
+            tested_object_mock_dict={
+                "oc_api.get_all_pods": Mock(
+                    return_value=[
+                        create_mock_acm_pod("multiclusterhub-operator-abc123", "Pending", True),
+                    ]
+                ),
+            },
+            oc_cmd_output_dict={
+                _ACM_SUB_CMD: CmdOutput(json.dumps(_acm_subscriptions(include_acm=True))),
+                _ACM_CSV_CMD: CmdOutput(json.dumps(_acm_csv_response(phase="Failed"))),
+            },
+            failed_msg=(
+                "ACM ClusterServiceVersion is not in Succeeded phase:\n"
+                "  advanced-cluster-management.v2.12.0 - Phase: Failed, "
+                "Reason: InstallFailed, Message: install failed\n\n"
+                "ACM operator has unhealthy pods in open-cluster-management namespace:\n"
+                "  multiclusterhub-operator-abc123 - Phase: Pending"
+            ),
+        ),
     ]
+
+    @pytest.mark.parametrize("scenario_params", scenario_prerequisite_fulfilled)
+    def test_prerequisite_fulfilled(self, scenario_params, tested_object):
+        """Test that prerequisite is met when ACM operator subscription exists."""
+        RuleTestBase.test_prerequisite_fulfilled(self, scenario_params, tested_object)
 
     @pytest.mark.parametrize("scenario_params", scenario_prerequisite_not_fulfilled)
     def test_prerequisite_not_fulfilled(self, scenario_params, tested_object):
@@ -2042,12 +2568,12 @@ class TestVerifyAcmOperatorHealth(RuleTestBase):
 
     @pytest.mark.parametrize("scenario_params", scenario_passed)
     def test_scenario_passed(self, scenario_params, tested_object):
-        """Test that rule passes when all ACM pods are healthy."""
+        """Test that rule passes when ACM CSV is succeeded and all pods are healthy."""
         RuleTestBase.test_scenario_passed(self, scenario_params, tested_object)
 
     @pytest.mark.parametrize("scenario_params", scenario_failed)
     def test_scenario_failed(self, scenario_params, tested_object):
-        """Test that rule fails when ACM pods are unhealthy or missing."""
+        """Test that rule fails when ACM CSV or pods are unhealthy."""
         RuleTestBase.test_scenario_failed(self, scenario_params, tested_object)
 
 
@@ -2073,8 +2599,14 @@ def _far_subscriptions(include_far=True):
     if include_far:
         items.append(
             {
-                "metadata": {"name": "far-sub", "namespace": "openshift-workload-availability"},
-                "spec": {"name": "fence-agents-remediation", "source": "redhat-operators"},
+                "metadata": {
+                    "name": "far-sub",
+                    "namespace": "openshift-workload-availability",
+                },
+                "spec": {
+                    "name": "fence-agents-remediation",
+                    "source": "redhat-operators",
+                },
             }
         )
     return {"items": items}
@@ -2089,9 +2621,15 @@ class TestVerifyFarOperatorHealth(RuleTestBase):
         RuleScenarioParams(
             "FAR operator subscription found",
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps(_far_subscriptions(include_far=True))
-                ),
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_far_subscriptions(include_far=True))),
             },
         ),
     ]
@@ -2102,15 +2640,25 @@ class TestVerifyFarOperatorHealth(RuleTestBase):
             tested_object_mock_dict={
                 "oc_api.get_all_pods": Mock(
                     return_value=[
-                        create_mock_far_pod("fence-agents-remediation-controller-manager-abc123", "Running", True),
+                        create_mock_far_pod(
+                            "fence-agents-remediation-controller-manager-abc123",
+                            "Running",
+                            True,
+                        ),
                         create_mock_far_pod("fence-agents-remediation-worker-xyz789", "Running", True),
                     ]
                 ),
             },
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps(_far_subscriptions(include_far=True))
-                ),
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_far_subscriptions(include_far=True))),
             },
         ),
     ]
@@ -2119,17 +2667,29 @@ class TestVerifyFarOperatorHealth(RuleTestBase):
         RuleScenarioParams(
             "FAR operator subscription not found",
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps(_far_subscriptions(include_far=False))
-                ),
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_far_subscriptions(include_far=False))),
             },
         ),
         RuleScenarioParams(
             "no subscriptions exist in cluster",
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps({"items": []})
-                ),
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps({"items": []})),
             },
         ),
     ]
@@ -2141,9 +2701,15 @@ class TestVerifyFarOperatorHealth(RuleTestBase):
                 "oc_api.get_all_pods": Mock(return_value=[]),
             },
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps(_far_subscriptions(include_far=True))
-                ),
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_far_subscriptions(include_far=True))),
             },
             failed_msg="No pods found in openshift-workload-availability namespace."
             " FAR operator may not be fully deployed.",
@@ -2153,15 +2719,25 @@ class TestVerifyFarOperatorHealth(RuleTestBase):
             tested_object_mock_dict={
                 "oc_api.get_all_pods": Mock(
                     return_value=[
-                        create_mock_far_pod("fence-agents-remediation-controller-manager-abc123", "Running", True),
+                        create_mock_far_pod(
+                            "fence-agents-remediation-controller-manager-abc123",
+                            "Running",
+                            True,
+                        ),
                         create_mock_far_pod("fence-agents-remediation-worker-xyz789", "Pending", True),
                     ]
                 ),
             },
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps(_far_subscriptions(include_far=True))
-                ),
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_far_subscriptions(include_far=True))),
             },
             failed_msg="FAR operator has unhealthy pods in openshift-workload-availability namespace:\n"
             "  fence-agents-remediation-worker-xyz789 - Phase: Pending",
@@ -2171,14 +2747,24 @@ class TestVerifyFarOperatorHealth(RuleTestBase):
             tested_object_mock_dict={
                 "oc_api.get_all_pods": Mock(
                     return_value=[
-                        create_mock_far_pod("fence-agents-remediation-controller-manager-abc123", "Running", False),
+                        create_mock_far_pod(
+                            "fence-agents-remediation-controller-manager-abc123",
+                            "Running",
+                            False,
+                        ),
                     ]
                 ),
             },
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps(_far_subscriptions(include_far=True))
-                ),
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_far_subscriptions(include_far=True))),
             },
             failed_msg="FAR operator has unhealthy pods in openshift-workload-availability namespace:\n"
             "  fence-agents-remediation-controller-manager-abc123 - Running, Not all containers ready",
@@ -2188,14 +2774,24 @@ class TestVerifyFarOperatorHealth(RuleTestBase):
             tested_object_mock_dict={
                 "oc_api.get_all_pods": Mock(
                     return_value=[
-                        create_mock_far_pod("fence-agents-remediation-controller-manager-abc123", "Succeeded", True),
+                        create_mock_far_pod(
+                            "fence-agents-remediation-controller-manager-abc123",
+                            "Succeeded",
+                            True,
+                        ),
                     ]
                 ),
             },
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps(_far_subscriptions(include_far=True))
-                ),
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_far_subscriptions(include_far=True))),
             },
             failed_msg="Failed to evaluate status for FAR pod(s):\n"
             "  fence-agents-remediation-controller-manager-abc123",
@@ -2205,15 +2801,25 @@ class TestVerifyFarOperatorHealth(RuleTestBase):
             tested_object_mock_dict={
                 "oc_api.get_all_pods": Mock(
                     return_value=[
-                        create_mock_far_pod("fence-agents-remediation-controller-manager-abc123", "Succeeded", True),
+                        create_mock_far_pod(
+                            "fence-agents-remediation-controller-manager-abc123",
+                            "Succeeded",
+                            True,
+                        ),
                         create_mock_far_pod("fence-agents-remediation-worker-xyz789", "Running", False),
                     ]
                 ),
             },
             oc_cmd_output_dict={
-                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
-                    json.dumps(_far_subscriptions(include_far=True))
-                ),
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_far_subscriptions(include_far=True))),
             },
             failed_msg="Failed to evaluate status for FAR pod(s):\n"
             "  fence-agents-remediation-controller-manager-abc123\n\n"
@@ -2240,4 +2846,1019 @@ class TestVerifyFarOperatorHealth(RuleTestBase):
     @pytest.mark.parametrize("scenario_params", scenario_failed)
     def test_scenario_failed(self, scenario_params, tested_object):
         """Test that rule fails when FAR pods are unhealthy or missing."""
+        RuleTestBase.test_scenario_failed(self, scenario_params, tested_object)
+
+
+def _far_subscription_response(has_far=True):
+    """Build OLM subscription list response."""
+    items = []
+    if has_far:
+        items.append(
+            {
+                "metadata": {
+                    "name": "fence-agents-remediation",
+                    "namespace": "openshift-workload-availability",
+                },
+                "spec": {"name": "fence-agents-remediation"},
+            }
+        )
+    return {"items": items}
+
+
+def _far_subscription_response_custom_name():
+    """Build OLM subscription list with custom metadata.name but correct spec.name."""
+    return {
+        "items": [
+            {
+                "metadata": {
+                    "name": "my-custom-far-sub",
+                    "namespace": "openshift-workload-availability",
+                },
+                "spec": {"name": "fence-agents-remediation"},
+            }
+        ]
+    }
+
+
+def _create_far_pod(
+    name,
+    run_as_non_root=True,
+    containers_run_as_user=None,
+    has_security_context=True,
+    has_run_as_non_root=True,
+    has_containers=True,
+    init_containers_run_as_user=None,
+):
+    """Create a mock FAR pod object for security context tests.
+
+    Args:
+        name: Pod name
+        run_as_non_root: Value for pod-level runAsNonRoot
+        containers_run_as_user: List of runAsUser values per container (None means no securityContext)
+        has_security_context: Whether pod has a securityContext at all
+        has_run_as_non_root: Whether runAsNonRoot is present in securityContext
+        has_containers: Whether the pod has containers
+        init_containers_run_as_user: List of runAsUser values per init container (None means no initContainers)
+    """
+    mock_pod = Mock()
+    spec = {}
+
+    if has_security_context:
+        sc = {}
+        if has_run_as_non_root:
+            sc["runAsNonRoot"] = run_as_non_root
+        spec["securityContext"] = sc
+    else:
+        spec["securityContext"] = None
+
+    if has_containers:
+        containers = []
+        if containers_run_as_user is None:
+            containers_run_as_user = [1000]
+        for uid in containers_run_as_user:
+            container = {"name": f"container-{uid}"}
+            if uid is not None:
+                container["securityContext"] = {"runAsUser": uid}
+            else:
+                container["securityContext"] = None
+            containers.append(container)
+        spec["containers"] = containers
+    else:
+        spec["containers"] = []
+
+    if init_containers_run_as_user is not None:
+        init_containers = []
+        for uid in init_containers_run_as_user:
+            ic = {"name": f"init-container-{uid}"}
+            if uid is not None:
+                ic["securityContext"] = {"runAsUser": uid}
+            else:
+                ic["securityContext"] = None
+            init_containers.append(ic)
+        spec["initContainers"] = init_containers
+
+    mock_pod.name.return_value = name
+    mock_pod.as_dict.return_value = {
+        "metadata": {"name": name, "namespace": "openshift-workload-availability"},
+        "spec": spec,
+    }
+    return mock_pod
+
+
+def create_mock_infrastructure_for_far(topology):
+    """Create a mock infrastructure object for FAR tests."""
+    mock_infra = Mock()
+    mock_infra.as_dict.return_value = {
+        "status": {"controlPlaneTopology": topology},
+    }
+    return mock_infra
+
+
+class TestVerifyFARControllerReplicas(RuleTestBase):
+    """Tests for VerifyFARControllerReplicas rule."""
+
+    tested_type = VerifyFARControllerReplicas
+
+    # Test: Prerequisite fulfilled - FAR deployment exists
+    scenario_prerequisite_fulfilled = [
+        RuleScenarioParams(
+            "FAR deployment exists",
+            tested_object_mock_dict={
+                "oc_api.get_all_deployments": Mock(
+                    return_value=[
+                        create_mock_deployment(
+                            "fence-agents-remediation-controller-manager",
+                            "openshift-workload-availability",
+                            spec={"replicas": 2},
+                            status={"readyReplicas": 2},
+                        ),
+                    ]
+                ),
+            },
+        ),
+    ]
+
+    # Test: Prerequisite not fulfilled - FAR deployment does not exist
+    scenario_prerequisite_not_fulfilled = [
+        RuleScenarioParams(
+            "FAR deployment does not exist",
+            tested_object_mock_dict={
+                "oc_api.get_all_deployments": Mock(return_value=[]),
+            },
+        ),
+    ]
+
+    # Test: Rule passed - Deployment has 2 replicas and 2 ready
+    scenario_passed = [
+        RuleScenarioParams(
+            "FAR deployment has 2 replicas and all are ready",
+            tested_object_mock_dict={
+                "oc_api.select_resources": Mock(return_value=create_mock_infrastructure_for_far("HighlyAvailable")),
+                "oc_api.get_all_deployments": Mock(
+                    return_value=[
+                        create_mock_deployment(
+                            "fence-agents-remediation-controller-manager",
+                            "openshift-workload-availability",
+                            spec={"replicas": 2},
+                            status={"readyReplicas": 2},
+                        ),
+                    ]
+                ),
+            },
+        ),
+    ]
+
+    # Test: Rule failed - Wrong replica count
+    scenario_failed = [
+        RuleScenarioParams(
+            "FAR deployment has wrong spec replicas",
+            tested_object_mock_dict={
+                "oc_api.select_resources": Mock(return_value=create_mock_infrastructure_for_far("HighlyAvailable")),
+                "oc_api.get_all_deployments": Mock(
+                    return_value=[
+                        create_mock_deployment(
+                            "fence-agents-remediation-controller-manager",
+                            "openshift-workload-availability",
+                            spec={"replicas": 1},
+                            status={"readyReplicas": 1},
+                        ),
+                    ]
+                ),
+            },
+            failed_msg="Expected 2 replicas in deployment spec, but found 1",
+        ),
+        RuleScenarioParams(
+            "FAR deployment has correct spec but not all replicas ready",
+            tested_object_mock_dict={
+                "oc_api.select_resources": Mock(return_value=create_mock_infrastructure_for_far("HighlyAvailable")),
+                "oc_api.get_all_deployments": Mock(
+                    return_value=[
+                        create_mock_deployment(
+                            "fence-agents-remediation-controller-manager",
+                            "openshift-workload-availability",
+                            spec={"replicas": 2},
+                            status={"readyReplicas": 1},
+                        ),
+                    ]
+                ),
+            },
+            failed_msg="Expected 2 ready replicas, but only 1 are ready",
+        ),
+    ]
+
+    @pytest.mark.parametrize("scenario_params", scenario_prerequisite_fulfilled)
+    def test_prerequisite_fulfilled(self, scenario_params, tested_object):
+        """Test that prerequisite is met when FAR deployment exists."""
+        RuleTestBase.test_prerequisite_fulfilled(self, scenario_params, tested_object)
+
+    @pytest.mark.parametrize("scenario_params", scenario_prerequisite_not_fulfilled)
+    def test_prerequisite_not_fulfilled(self, scenario_params, tested_object):
+        """Test that prerequisite is not met when FAR deployment does not exist."""
+        RuleTestBase.test_prerequisite_not_fulfilled(self, scenario_params, tested_object)
+
+    @pytest.mark.parametrize("scenario_params", scenario_passed)
+    def test_scenario_passed(self, scenario_params, tested_object):
+        """Test that rule passes when deployment has correct replicas."""
+        RuleTestBase.test_scenario_passed(self, scenario_params, tested_object)
+
+    @pytest.mark.parametrize("scenario_params", scenario_failed)
+    def test_scenario_failed(self, scenario_params, tested_object):
+        """Test that rule fails when replica count is wrong."""
+        RuleTestBase.test_scenario_failed(self, scenario_params, tested_object)
+
+    def test_sno_cluster_skipped(self, tested_object):
+        """Test that rule is skipped on SNO (Single Node OpenShift) cluster."""
+        tested_object.oc_api.select_resources = Mock(return_value=create_mock_infrastructure_for_far("SingleReplica"))
+        tested_object.oc_api.get_all_deployments = Mock(
+            return_value=[
+                create_mock_deployment(
+                    "fence-agents-remediation-controller-manager",
+                    "openshift-workload-availability",
+                    spec={"replicas": 1},
+                    status={"readyReplicas": 1},
+                ),
+            ]
+        )
+
+        result = tested_object.run_rule()
+        assert result.status == Status.SKIP
+        assert "SNO" in result.message or "Single Node OpenShift" in result.message
+
+
+class TestVerifyFarContainerNonRoot(RuleTestBase):
+    """Test VerifyFarContainerNonRoot rule."""
+
+    tested_type = VerifyFarContainerNonRoot
+
+    scenario_passed = [
+        RuleScenarioParams(
+            "FAR pod runs as non-root with proper security context",
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_far_subscription_response(has_far=True))),
+            },
+            tested_object_mock_dict={
+                "oc_api.get_pods": Mock(
+                    return_value=[
+                        _create_far_pod(
+                            "far-controller-manager-abc123",
+                            run_as_non_root=True,
+                            containers_run_as_user=[1000],
+                        ),
+                    ]
+                ),
+            },
+        ),
+        RuleScenarioParams(
+            "multiple FAR pods all run as non-root",
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_far_subscription_response(has_far=True))),
+            },
+            tested_object_mock_dict={
+                "oc_api.get_pods": Mock(
+                    return_value=[
+                        _create_far_pod(
+                            "far-controller-manager-abc123",
+                            run_as_non_root=True,
+                            containers_run_as_user=[1000],
+                        ),
+                        _create_far_pod(
+                            "far-controller-manager-def456",
+                            run_as_non_root=True,
+                            containers_run_as_user=[1000, 65534],
+                        ),
+                    ]
+                ),
+            },
+        ),
+    ]
+
+    scenario_prerequisite_not_fulfilled = [
+        RuleScenarioParams(
+            "FAR operator subscription not found",
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_far_subscription_response(has_far=False))),
+            },
+        ),
+    ]
+
+    scenario_prerequisite_fulfilled = [
+        RuleScenarioParams(
+            "FAR operator subscription exists",
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_far_subscription_response(has_far=True))),
+            },
+        ),
+        RuleScenarioParams(
+            "FAR subscription with custom metadata.name but correct spec.name",
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_far_subscription_response_custom_name())),
+            },
+        ),
+    ]
+
+    scenario_failed = [
+        RuleScenarioParams(
+            "no FAR pods found",
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_far_subscription_response(has_far=True))),
+            },
+            tested_object_mock_dict={
+                "oc_api.get_pods": Mock(return_value=[]),
+            },
+            failed_msg="No FAR pods found with label app.kubernetes.io/name=fence-agents-remediation-operator",
+        ),
+        RuleScenarioParams(
+            "FAR pod has nil SecurityContext",
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_far_subscription_response(has_far=True))),
+            },
+            tested_object_mock_dict={
+                "oc_api.get_pods": Mock(
+                    return_value=[
+                        _create_far_pod("far-pod-1", has_security_context=False),
+                    ]
+                ),
+            },
+            failed_msg="FAR operator pods doesn't have proper security context:\n- Pod far-pod-1 has nil SecurityContext\n",
+        ),
+        RuleScenarioParams(
+            "FAR pod has nil runAsNonRoot",
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_far_subscription_response(has_far=True))),
+            },
+            tested_object_mock_dict={
+                "oc_api.get_pods": Mock(
+                    return_value=[
+                        _create_far_pod("far-pod-1", has_run_as_non_root=False),
+                    ]
+                ),
+            },
+            failed_msg="FAR operator pods doesn't have proper security context:\n- Pod far-pod-1 has nil runAsNonRoot\n",
+        ),
+        RuleScenarioParams(
+            "FAR pod has runAsNonRoot set to false",
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_far_subscription_response(has_far=True))),
+            },
+            tested_object_mock_dict={
+                "oc_api.get_pods": Mock(
+                    return_value=[
+                        _create_far_pod("far-pod-1", run_as_non_root=False),
+                    ]
+                ),
+            },
+            failed_msg="FAR operator pods doesn't have proper security context:\n"
+            "- Incorrect runAsNonRoot for pod far-pod-1. Expected true, found: False\n",
+        ),
+        RuleScenarioParams(
+            "FAR pod has no containers",
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_far_subscription_response(has_far=True))),
+            },
+            tested_object_mock_dict={
+                "oc_api.get_pods": Mock(
+                    return_value=[
+                        _create_far_pod("far-pod-1", has_containers=False),
+                    ]
+                ),
+            },
+            failed_msg="FAR operator pods doesn't have proper security context:\n- Pod far-pod-1 has no containers\n",
+        ),
+        RuleScenarioParams(
+            "FAR container runs as root (runAsUser=0)",
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_far_subscription_response(has_far=True))),
+            },
+            tested_object_mock_dict={
+                "oc_api.get_pods": Mock(
+                    return_value=[
+                        _create_far_pod(
+                            "far-pod-1",
+                            run_as_non_root=True,
+                            containers_run_as_user=[0],
+                        ),
+                    ]
+                ),
+            },
+            failed_msg="FAR operator pods doesn't have proper security context:\n"
+            "- Container 'container-0' in pod far-pod-1 runs as root (runAsUser=0)\n",
+        ),
+        RuleScenarioParams(
+            "FAR init container runs as root (runAsUser=0)",
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_far_subscription_response(has_far=True))),
+            },
+            tested_object_mock_dict={
+                "oc_api.get_pods": Mock(
+                    return_value=[
+                        _create_far_pod(
+                            "far-pod-1",
+                            run_as_non_root=True,
+                            containers_run_as_user=[1000],
+                            init_containers_run_as_user=[0],
+                        ),
+                    ]
+                ),
+            },
+            failed_msg="FAR operator pods doesn't have proper security context:\n"
+            "- Container 'init-container-0' in pod far-pod-1 runs as root (runAsUser=0)\n",
+        ),
+        RuleScenarioParams(
+            "mixed failures - nil SecurityContext and root container",
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_far_subscription_response(has_far=True))),
+            },
+            tested_object_mock_dict={
+                "oc_api.get_pods": Mock(
+                    return_value=[
+                        _create_far_pod("far-pod-1", has_security_context=False),
+                        _create_far_pod(
+                            "far-pod-2",
+                            run_as_non_root=True,
+                            containers_run_as_user=[0, 1000],
+                        ),
+                    ]
+                ),
+            },
+            failed_msg="FAR operator pods doesn't have proper security context:\n"
+            "- Pod far-pod-1 has nil SecurityContext\n"
+            "- Container 'container-0' in pod far-pod-2 runs as root (runAsUser=0)\n",
+        ),
+        RuleScenarioParams(
+            "FAR container has invalid runAsUser (negative value)",
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_far_subscription_response(has_far=True))),
+            },
+            tested_object_mock_dict={
+                "oc_api.get_pods": Mock(
+                    return_value=[
+                        _create_far_pod(
+                            "far-pod-1",
+                            run_as_non_root=True,
+                            containers_run_as_user=[-1],
+                        ),
+                    ]
+                ),
+            },
+            failed_msg="FAR operator pods doesn't have proper security context:\n"
+            "- Container 'container--1' in pod far-pod-1 has invalid runAsUser: -1\n",
+        ),
+    ]
+
+    @pytest.mark.parametrize("scenario_params", scenario_prerequisite_not_fulfilled)
+    def test_prerequisite_not_fulfilled(self, scenario_params, tested_object):
+        RuleTestBase.test_prerequisite_not_fulfilled(self, scenario_params, tested_object)
+
+    @pytest.mark.parametrize("scenario_params", scenario_prerequisite_fulfilled)
+    def test_prerequisite_fulfilled(self, scenario_params, tested_object):
+        RuleTestBase.test_prerequisite_fulfilled(self, scenario_params, tested_object)
+
+    @pytest.mark.parametrize("scenario_params", scenario_passed)
+    def test_scenario_passed(self, scenario_params, tested_object):
+        RuleTestBase.test_scenario_passed(self, scenario_params, tested_object)
+
+    @pytest.mark.parametrize("scenario_params", scenario_failed)
+    def test_scenario_failed(self, scenario_params, tested_object):
+        RuleTestBase.test_scenario_failed(self, scenario_params, tested_object)
+
+
+def create_mock_nmo_pod(name, phase, all_containers_ready=True):
+    """Create a mock NMO pod object."""
+    mock_pod = Mock()
+    container_statuses = [
+        {"ready": all_containers_ready},
+    ]
+    mock_pod.as_dict.return_value = {
+        "metadata": {"namespace": "openshift-workload-availability", "name": name},
+        "status": {
+            "phase": phase,
+            "containerStatuses": container_statuses,
+        },
+    }
+    return mock_pod
+
+
+def _nmo_subscriptions(include_nmo=True):
+    """Build a subscriptions response, optionally including the NMO subscription."""
+    items = []
+    if include_nmo:
+        items.append(
+            {
+                "metadata": {
+                    "name": "nmo-sub",
+                    "namespace": "openshift-workload-availability",
+                },
+                "spec": {
+                    "name": "node-maintenance-operator",
+                    "source": "redhat-operators",
+                },
+            }
+        )
+    return {"items": items}
+
+
+class TestVerifyNmoOperatorHealth(RuleTestBase):
+    """Tests for VerifyNmoOperatorHealth rule."""
+
+    tested_type = VerifyNmoOperatorHealth
+
+    scenario_prerequisite_fulfilled = [
+        RuleScenarioParams(
+            "NMO operator subscription found",
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_nmo_subscriptions(include_nmo=True))),
+            },
+        ),
+    ]
+
+    scenario_passed = [
+        RuleScenarioParams(
+            "NMO operator installed and all pods healthy",
+            tested_object_mock_dict={
+                "oc_api.get_all_pods": Mock(
+                    return_value=[
+                        create_mock_nmo_pod(
+                            "node-maintenance-operator-controller-manager-abc123",
+                            "Running",
+                            True,
+                        ),
+                    ]
+                ),
+            },
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_nmo_subscriptions(include_nmo=True))),
+            },
+        ),
+    ]
+
+    scenario_prerequisite_not_fulfilled = [
+        RuleScenarioParams(
+            "NMO operator subscription not found",
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_nmo_subscriptions(include_nmo=False))),
+            },
+        ),
+        RuleScenarioParams(
+            "no subscriptions exist in cluster",
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps({"items": []})),
+            },
+        ),
+    ]
+
+    scenario_failed = [
+        RuleScenarioParams(
+            "NMO operator installed but no pods found",
+            tested_object_mock_dict={
+                "oc_api.get_all_pods": Mock(return_value=[]),
+            },
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_nmo_subscriptions(include_nmo=True))),
+            },
+            failed_msg="No pods found in openshift-workload-availability namespace."
+            " NMO operator may not be fully deployed.",
+        ),
+        RuleScenarioParams(
+            "NMO operator installed but some pods are not running",
+            tested_object_mock_dict={
+                "oc_api.get_all_pods": Mock(
+                    return_value=[
+                        create_mock_nmo_pod(
+                            "node-maintenance-operator-controller-manager-abc123",
+                            "Running",
+                            True,
+                        ),
+                        create_mock_nmo_pod("node-maintenance-operator-worker-xyz789", "Pending", True),
+                    ]
+                ),
+            },
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_nmo_subscriptions(include_nmo=True))),
+            },
+            failed_msg="NMO operator has unhealthy pods in openshift-workload-availability namespace:\n"
+            "  node-maintenance-operator-worker-xyz789 - Phase: Pending",
+        ),
+        RuleScenarioParams(
+            "NMO operator installed but containers not ready",
+            tested_object_mock_dict={
+                "oc_api.get_all_pods": Mock(
+                    return_value=[
+                        create_mock_nmo_pod(
+                            "node-maintenance-operator-controller-manager-abc123",
+                            "Running",
+                            False,
+                        ),
+                    ]
+                ),
+            },
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_nmo_subscriptions(include_nmo=True))),
+            },
+            failed_msg="NMO operator has unhealthy pods in openshift-workload-availability namespace:\n"
+            "  node-maintenance-operator-controller-manager-abc123 - Running, Not all containers ready",
+        ),
+        RuleScenarioParams(
+            "NMO operator installed but pod status unknown",
+            tested_object_mock_dict={
+                "oc_api.get_all_pods": Mock(
+                    return_value=[
+                        create_mock_nmo_pod(
+                            "node-maintenance-operator-controller-manager-abc123",
+                            "Succeeded",
+                            True,
+                        ),
+                    ]
+                ),
+            },
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_nmo_subscriptions(include_nmo=True))),
+            },
+            failed_msg="Failed to evaluate status for NMO pod(s):\n"
+            "  node-maintenance-operator-controller-manager-abc123",
+        ),
+        RuleScenarioParams(
+            "NMO operator installed with unknown and unhealthy pods",
+            tested_object_mock_dict={
+                "oc_api.get_all_pods": Mock(
+                    return_value=[
+                        create_mock_nmo_pod(
+                            "node-maintenance-operator-controller-manager-abc123",
+                            "Succeeded",
+                            True,
+                        ),
+                        create_mock_nmo_pod("node-maintenance-operator-worker-xyz789", "Running", False),
+                    ]
+                ),
+            },
+            oc_cmd_output_dict={
+                (
+                    "get",
+                    (
+                        "subscriptions.operators.coreos.com",
+                        "--all-namespaces",
+                        "-o",
+                        "json",
+                    ),
+                ): CmdOutput(json.dumps(_nmo_subscriptions(include_nmo=True))),
+            },
+            failed_msg="Failed to evaluate status for NMO pod(s):\n"
+            "  node-maintenance-operator-controller-manager-abc123\n\n"
+            "NMO operator has unhealthy pods in openshift-workload-availability namespace:\n"
+            "  node-maintenance-operator-worker-xyz789 - Running, Not all containers ready",
+        ),
+    ]
+
+    @pytest.mark.parametrize("scenario_params", scenario_prerequisite_fulfilled)
+    def test_prerequisite_fulfilled(self, scenario_params, tested_object):
+        """Test that prerequisite is met when NMO operator is installed."""
+        RuleTestBase.test_prerequisite_fulfilled(self, scenario_params, tested_object)
+
+    @pytest.mark.parametrize("scenario_params", scenario_prerequisite_not_fulfilled)
+    def test_prerequisite_not_fulfilled(self, scenario_params, tested_object):
+        """Test that prerequisite is not met when NMO operator is not installed."""
+        RuleTestBase.test_prerequisite_not_fulfilled(self, scenario_params, tested_object)
+
+    @pytest.mark.parametrize("scenario_params", scenario_passed)
+    def test_scenario_passed(self, scenario_params, tested_object):
+        """Test that rule passes when all NMO pods are healthy."""
+        RuleTestBase.test_scenario_passed(self, scenario_params, tested_object)
+
+    @pytest.mark.parametrize("scenario_params", scenario_failed)
+    def test_scenario_failed(self, scenario_params, tested_object):
+        """Test that rule fails when NMO pods are unhealthy or missing."""
+        RuleTestBase.test_scenario_failed(self, scenario_params, tested_object)
+def create_mock_mdr_pod(name, phase, all_containers_ready=True):
+    """Create a mock MDR pod object."""
+    mock_pod = Mock()
+    container_statuses = [
+        {"ready": all_containers_ready},
+    ]
+    mock_pod.as_dict.return_value = {
+        "metadata": {"namespace": "openshift-workload-availability", "name": name},
+        "status": {
+            "phase": phase,
+            "containerStatuses": container_statuses,
+        },
+    }
+    return mock_pod
+
+
+def _mdr_subscriptions(include_mdr=True):
+    """Build a subscriptions response, optionally including the MDR subscription."""
+    items = []
+    if include_mdr:
+        items.append(
+            {
+                "metadata": {"name": "mdr-sub", "namespace": "openshift-workload-availability"},
+                "spec": {"name": "openshift-workload-availability", "source": "redhat-operators"},
+            }
+        )
+    items.append(
+        {
+            "metadata": {"name": "other-operator", "namespace": "openshift-operators"},
+            "spec": {"name": "other", "source": "redhat-operators"},
+        }
+    )
+    return {"items": items}
+
+
+class TestVerifyMdrOperatorHealth(RuleTestBase):
+    """Test VerifyMdrOperatorHealth rule."""
+
+    tested_type = VerifyMdrOperatorHealth
+
+    scenario_passed = [
+        RuleScenarioParams(
+            "MDR operator installed and all pods are healthy",
+            tested_object_mock_dict={
+                "oc_api.get_all_pods": Mock(
+                    return_value=[
+                        create_mock_mdr_pod("mdr-controller-manager-abc123", "Running", True),
+                        create_mock_mdr_pod("mdr-worker-xyz789", "Running", True),
+                    ]
+                ),
+            },
+            oc_cmd_output_dict={
+                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
+                    json.dumps(_mdr_subscriptions(include_mdr=True))
+                ),
+            },
+        ),
+    ]
+
+    scenario_prerequisite_not_fulfilled = [
+        RuleScenarioParams(
+            "MDR operator subscription not found",
+            oc_cmd_output_dict={
+                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
+                    json.dumps(_mdr_subscriptions(include_mdr=False))
+                ),
+            },
+        ),
+        RuleScenarioParams(
+            "no subscriptions exist in cluster",
+            oc_cmd_output_dict={
+                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
+                    json.dumps({"items": []})
+                ),
+            },
+        ),
+    ]
+
+    scenario_failed = [
+        RuleScenarioParams(
+            "MDR operator installed but no pods found",
+            tested_object_mock_dict={
+                "oc_api.get_all_pods": Mock(return_value=[]),
+            },
+            oc_cmd_output_dict={
+                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
+                    json.dumps(_mdr_subscriptions(include_mdr=True))
+                ),
+            },
+            failed_msg="No pods found in openshift-workload-availability namespace. "
+            "Machine Deletion Remediation operator may not be fully deployed.",
+        ),
+        RuleScenarioParams(
+            "MDR operator installed but some pods are not running",
+            tested_object_mock_dict={
+                "oc_api.get_all_pods": Mock(
+                    return_value=[
+                        create_mock_mdr_pod("mdr-controller-manager-abc123", "Running", True),
+                        create_mock_mdr_pod("mdr-worker-xyz789", "Pending", True),
+                    ]
+                ),
+            },
+            oc_cmd_output_dict={
+                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
+                    json.dumps(_mdr_subscriptions(include_mdr=True))
+                ),
+            },
+            failed_msg="Machine Deletion Remediation operator has unhealthy pods in openshift-workload-availability namespace:\n"
+            "  mdr-worker-xyz789 - Phase: Pending",
+        ),
+        RuleScenarioParams(
+            "MDR operator installed but containers not ready",
+            tested_object_mock_dict={
+                "oc_api.get_all_pods": Mock(
+                    return_value=[
+                        create_mock_mdr_pod("mdr-controller-manager-abc123", "Running", False),
+                    ]
+                ),
+            },
+            oc_cmd_output_dict={
+                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
+                    json.dumps(_mdr_subscriptions(include_mdr=True))
+                ),
+            },
+            failed_msg="Machine Deletion Remediation operator has unhealthy pods in openshift-workload-availability namespace:\n"
+            "  mdr-controller-manager-abc123 - Running, Not all containers ready",
+        ),
+        RuleScenarioParams(
+            "MDR operator installed but pod status unknown",
+            tested_object_mock_dict={
+                "oc_api.get_all_pods": Mock(
+                    return_value=[
+                        create_mock_mdr_pod("mdr-controller-manager-abc123", "Succeeded", True),
+                    ]
+                ),
+            },
+            oc_cmd_output_dict={
+                ("get", ("subscriptions.operators.coreos.com", "--all-namespaces", "-o", "json")): CmdOutput(
+                    json.dumps(_mdr_subscriptions(include_mdr=True))
+                ),
+            },
+            failed_msg="Machine Deletion Remediation operator has pods in unexpected succeeded state:\n  mdr-controller-manager-abc123",
+        ),
+    ]
+
+    @pytest.mark.parametrize("scenario_params", scenario_prerequisite_not_fulfilled)
+    def test_prerequisite_not_fulfilled(self, scenario_params, tested_object):
+        """Test that prerequisite is not met when MDR operator is not installed."""
+        RuleTestBase.test_prerequisite_not_fulfilled(self, scenario_params, tested_object)
+
+    @pytest.mark.parametrize("scenario_params", scenario_passed)
+    def test_scenario_passed(self, scenario_params, tested_object):
+        """Test that rule passes when all MDR pods are healthy."""
+        RuleTestBase.test_scenario_passed(self, scenario_params, tested_object)
+
+    @pytest.mark.parametrize("scenario_params", scenario_failed)
+    def test_scenario_failed(self, scenario_params, tested_object):
+        """Test that rule fails when MDR pods are unhealthy or missing."""
         RuleTestBase.test_scenario_failed(self, scenario_params, tested_object)
